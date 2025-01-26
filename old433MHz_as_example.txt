@@ -1,0 +1,378 @@
+pi@RPi3B:~/temp/2021-11-01_backup_arduino/tx433_02 $ cat tx433_02.ino
+/*
+ * TX433
+ *
+ * Features:
+ *   - Messung von Akkuspannung und Temperatur üver NTC
+ *   - Schlaf, wakeup über Portpins (Bewegungsmelder) oder 8-s-Timer
+ *   - Senden von Daten über 433MHz-ASK-Modul
+ *
+ * Hardware: Arduino Nano (ATMega328)
+ *
+ * Vorlage/Idee von www.beelogger.de
+ * 2018-09-05 Uwe:
+ *      * Umstellung von VirtualWire auf RadioHead, weil die von VirtualWire
+ *        gesendeten Botschaften nicht grundsätzlich durch RadioHead empfangen
+ *        werden. Grund ist unklar, da RadioHead von VirtualWire abgeleitet ist,
+ *        aber offenbar wurde das Funkprotokoll leicht modifiziert. Von RadioHead
+ *        zu VirtualWire kommen Botschaften an (also CRC ok), aber die Dateninhalte
+ *        stimmen nicht. Von VirtualWire zu RadioHead werden Botschaften nicht erkannt.
+ *
+ *        RadioHead-Beispiel:
+ *          https://www.airspayce.com/mikem/arduino/RadioHead/ask_receiver_8pde-example.html
+ *       * Zähler für Moves hinzu
+ *       * Zähler für Wakeup-Cycles und Sende-Events hinzu
+ *       * Nicht bei jedem Timer-Wakeup senden, sondern nur alle n Zyklen
+ *       * Sensor-ID im ersten Byte der Sendebotschaft hinzu
+ * 2018-09-16 Uwe:
+ *       * Schlafzeit abhängig von Sensor-ID, so dass jeder Sensor mal ungestört
+ *         seine Daten übertägt
+ *       * zweimal statt viermal das Datenpaket senden (reicht auch)
+ * 2020-01-14 Uwe:
+ *       * neue Sensor-ID 0x52 mit Weiterem Spannungskanal (für 12V-Auto-Batterie)
+ * 2020-01-22 Uwe:
+ *       * auch Sensor 0x51 sendet uAux (z.B. für 12V-Auto-Batterie)
+ * 2020-09-12 Uwe:
+ *       * Sensor 0x53 neu, Vorbereitung für Bodenfeuchtemessung
+ * 2020-11-03 Uwe:
+ *       * Sensor 0x53 (Bodenfeuchtemessung): öfter hintereinander senden, dafür größerer Abstand
+ *
+
+*/
+
+#include <RH_ASK.h> /* RadioHead fuer Tx433 mit AmplitudeShiftKeying */
+#include <SPI.h> // Not actually used but needed to compile
+#include "LowPower.h"
+
+#define MY_SENSOR_ID 0x53
+
+#define WITH_SERIAL_DEBUG
+
+#define WAKEUP_PIN0 2
+#define WAKEUP_PIN1 3
+#define VCC_MEAS_ENABLE_PIN 9
+#define SUPPLY_FEUCHTESENSOR_PIN 8 /* D8 schaltet die Versorgung für Feuchtesensor */
+
+/* 433 MHz: RadioHead-Library: ****************************************************/
+#define TRX433_BAUD 2000
+#define TRX433_RXPIN 5 /* nutzen wir hier vorerst nicht */
+#define TRX433_TXPIN 4
+#define TRX433_PTTPIN 0 /* brauchen wir nicht */
+
+
+RH_ASK driver433(TRX433_BAUD, TRX433_RXPIN, TRX433_TXPIN, TRX433_PTTPIN);
+
+/* Analog Pins */
+#define AdcVccPin  A0
+#define AdcNtcPin A5
+#define Adc12VPin A1
+#define AdcFeuchtesensorPin A2
+
+// resistance at 25 degrees C
+#define THERMISTORNOMINAL 10000
+// temp. for nominal resistance (almost always 25 C)
+#define TEMPERATURENOMINAL 25
+// The beta coefficient of the thermistor (usually 3000-4000)
+// Wert durch Ausprobieren ermittelt, so dass berechnete Temperatur zum
+// Tabelle im Datenblatt passt. Abweichung <0.5K zwischen -10°C und 60°C
+#define BCOEFFICIENT 3900
+// the value of the 'other' resistor
+#define SERIESRESISTOR 12000
+
+
+
+#define WKREASON_RESET 1
+#define WKREASON_INT0 2
+#define WKREASON_INT1 3
+#define WKREASON_8S 4
+
+char msg[80];
+uint8_t nFastSleep = 0;
+int u_supply_mV = 0;
+uint8_t myWakeupReason;
+uint16_t nMoves = 0;
+uint16_t nWakeCycles = 0;
+uint16_t u_aux12V_mV = 0;
+uint16_t nTx = 0;
+uint16_t feuchteAdc=0;
+uint16_t resistance=0;
+
+
+
+float ohmToCelsius(float rNTC) {
+    //Umrechnen Widerstand zu Temperatur
+    // Quelle: https://learn.adafruit.com/thermistor/using-a-thermistor
+    float steinhart;
+    steinhart = rNTC / THERMISTORNOMINAL;     // (R/Ro)
+    steinhart = log(steinhart);                  // ln(R/Ro)
+    steinhart /= BCOEFFICIENT;                   // 1/B * ln(R/Ro)
+    steinhart += 1.0 / (TEMPERATURENOMINAL + 273.15); // + (1/To)
+    steinhart = 1.0 / steinhart;                 // Invert
+    steinhart -= 273.15;                         // convert to C
+    return steinhart;
+}
+
+void wakeUpFunction0() {
+  if (digitalRead(WAKEUP_PIN0)==LOW) {
+    /* Diese Abfrage scheint überflüssig, ist sie aber nicht: Nach Aufwachen durch Watchdog-Timer
+     *  wird der Interrupt nochmal ausgelöst (warum auch immer), obwohl der Pin das letzte Mal vor
+     *  dem Einschlafen gewackelt hat. Also prüfen wir hier explizit den Pegel auf Aktiv-LOW, um
+     *  zu entscheiden, ob der Pin wirklich die Weckursache war.
+     */
+    myWakeupReason=WKREASON_INT0;
+    nMoves++;
+  }
+}
+void wakeUpFunction1() {
+  if (digitalRead(WAKEUP_PIN1)==LOW) {
+    myWakeupReason=WKREASON_INT1;
+    nMoves++;
+  }
+}
+
+void setup() {
+  // initialize digital pin LED_BUILTIN as an output.
+  myWakeupReason=WKREASON_RESET; /* Reset */
+  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(VCC_MEAS_ENABLE_PIN, OUTPUT); // VCC für den Spannungsteiler zur Messung der VCC
+  pinMode(SUPPLY_FEUCHTESENSOR_PIN, OUTPUT); /* Versorgung für Feuchtesensor */
+  pinMode(WAKEUP_PIN0, INPUT_PULLUP);
+  pinMode(WAKEUP_PIN1, INPUT_PULLUP);
+
+  #ifdef WITH_SERIAL_DEBUG
+    Serial.begin(115200);
+    Serial.println(F("Starte..."));
+    Serial.println(F("Test der Temperaturberechnung:"));
+    float ohms;
+    /* Die Sollwerte sind aus der Tabelle des Datenblatts von Reichelt-10k-NTC (Vishay)
+     *  entnommen.
+     *  °C  Ohm
+     *  -40  332k
+     *  -10   55.05k
+     *  0    32.56k
+     *  25  10k
+     *  40 5.33k
+     *  60 2.49k
+     */
+    ohms = 332000;
+    Serial.print(ohms);Serial.print("ohm -->"); Serial.println(ohmToCelsius(ohms));
+    ohms = 55050;
+    Serial.print(ohms);Serial.print("ohm -->"); Serial.println(ohmToCelsius(ohms));
+    ohms = 32560;
+    Serial.print(ohms);Serial.print("ohm -->"); Serial.println(ohmToCelsius(ohms));
+    ohms = 10000;
+    Serial.print(ohms);Serial.print("ohm -->"); Serial.println(ohmToCelsius(ohms));
+    ohms = 5330;
+    Serial.print(ohms);Serial.print("ohm -->"); Serial.println(ohmToCelsius(ohms));
+    ohms = 2490;
+    Serial.print(ohms);Serial.print("ohm -->"); Serial.println(ohmToCelsius(ohms));
+  #endif
+  if (!driver433.init()) {
+     #ifdef WITH_SERIAL_DEBUG
+         Serial.println("init of RadioHead for 433MHz failed");
+     #endif
+  } else {
+     #ifdef WITH_SERIAL_DEBUG
+         Serial.println("init of RadioHead OK");
+     #endif
+  }
+
+}
+
+void blink(int pin, int n, int t) {
+  int i;
+  for (i=0; i<n; i++) {
+    digitalWrite(pin, HIGH);   // turn the LED on (HIGH is the voltage level)
+    delay(t);                       // wait for a second
+    digitalWrite(pin, LOW);    // turn the LED off by making the voltage LOW
+    delay(t);                       // wait for a second
+
+  }
+}
+
+
+void readTheInputsAndTransmitTheValues() {
+  uint32_t tmp32;
+  float R_NTC;
+  float celsius, celsius_m40_0k5;
+  int k;
+    analogReference(INTERNAL); /* interne 1.1V Refererenzspannung beim ATMega 328 */
+    digitalWrite(VCC_MEAS_ENABLE_PIN, HIGH); /* zur Messung der Voersorgungsspannung den Spannungsteiler versorgen */
+    delay(10);
+    tmp32 = analogRead(AdcVccPin);
+    tmp32 += analogRead(AdcVccPin);
+    tmp32 += analogRead(AdcVccPin);
+    tmp32 += analogRead(AdcVccPin);
+    tmp32>>=2;
+    tmp32*=5962; /* Spannungsteiler 15k und 3k3, mit URef=1.1V, ergibt 5.962mV/Digit */
+    tmp32/=1000; /* 1mV Auflösung */
+    u_supply_mV=tmp32;
+
+
+    if ((MY_SENSOR_ID==0x51) || (MY_SENSOR_ID==0x52)) {
+      /* Analogeingang (12-V-Autobatterie) messen (mit interner Referenzspannung) */
+      tmp32 = analogRead(Adc12VPin);
+      tmp32 += analogRead(Adc12VPin);
+      tmp32 += analogRead(Adc12VPin);
+      tmp32 += analogRead(Adc12VPin);
+      tmp32>>=2;
+      tmp32*=16374; /* Spannungsteiler 47k und 3k3, mit URef=1.1V, ergibt 16,374 mV/Digit */
+      tmp32/=1000; /* 1mV Auflösung */
+
+      /* Kalibrierung: mit den theoretischen Werten zeigen wir ca. 1.5% zu viel an, also runterkalibrieren: */
+      tmp32*= 985;
+      tmp32/=1000;
+      u_aux12V_mV=tmp32;
+
+    }
+
+
+    analogReference(DEFAULT); /* VCC vom Controller als Referenz, weil NTC-Pullup an VCC hängt */
+    /* Das Umschalten von interner Referenz auf VCC-Referenz scheint scnnell zu gehen. Nur
+     *  10ms warten:
+     */
+    delay(10);
+    tmp32 = analogRead(AdcNtcPin);
+    digitalWrite(VCC_MEAS_ENABLE_PIN, LOW); /* Strom sparen */
+
+    /* Bodenfeuchtemessung */
+    /* Messspannung einschalten */
+    digitalWrite(SUPPLY_FEUCHTESENSOR_PIN, HIGH);
+    delay(2); /* zwei Millisekunden warten zum Einschwingen */
+    feuchteAdc = analogRead(AdcFeuchtesensorPin); /* Spannung einlesen */
+    digitalWrite(SUPPLY_FEUCHTESENSOR_PIN, LOW); /* und Versorgung wieder auf Null */
+
+
+    /* gleich wieder auf intern umschalten, so dass während des Raussendens
+     *  die Spannung von 3 auf 1.1V abklingen kann. Aber warten alleine reicht nicht zum
+     *  Abklingen. Erst durch aktive Wandlung scheint die Spannung runter zu gehen. Daher
+     *  ein paar Wandlungen starten:
+     */
+    analogReference(INTERNAL); /* interne 1.1V Refererenzspannung beim ATMega 328 */
+    for (int w=0; w<10; w++) {
+       tmp32 += analogRead(AdcVccPin);
+    }
+
+    R_NTC = SERIESRESISTOR / (((float)1023 / (float)tmp32)  - (float)1);
+    celsius = ohmToCelsius(R_NTC);
+    celsius_m40_0k5 = (celsius+40)*2;
+    if (celsius_m40_0k5<0) celsius_m40_0k5=0;
+    if (celsius_m40_0k5>255) celsius_m40_0k5=255;
+    celsius_m40_0k5 = (int)celsius_m40_0k5;
+
+    #ifdef WITH_SERIAL_DEBUG
+      Serial.print(F("Supply mV:"));
+      Serial.println(u_supply_mV);
+      //Serial.print(F("myWakeupReason:"));
+      //Serial.println(myWakeupReason);
+      //Serial.print(F("AD NTC:"));
+      //Serial.println(tmp32);
+      //Serial.print(F("R NTC:"));
+      //Serial.println(R_NTC);
+      Serial.print("Temperature ");
+      Serial.print(celsius);
+      Serial.println(" *C");
+      //Serial.print("celsius_m40_0k5 ");
+      //Serial.println((int)celsius_m40_0k5);
+      //Serial.print(F("u_aux12V_mV:"));
+      //Serial.println(u_aux12V_mV);
+      Serial.print(F("feuchteAdc:"));
+      Serial.println(feuchteAdc);
+
+    #endif
+    //sprintf(msg, "%d", sensorValue);
+    msg[0] = MY_SENSOR_ID;
+    msg[1] = u_supply_mV; /* low byte */
+    msg[2] = u_supply_mV>>8; /* high byte */
+    msg[3] = myWakeupReason;
+    msg[4] = celsius_m40_0k5;
+    if (MY_SENSOR_ID==0x50) {
+      msg[5] = nMoves; /* low byte */
+      msg[6] = nMoves>>8; /* high byte */
+    }
+    if ((MY_SENSOR_ID==0x51) || (MY_SENSOR_ID==0x52)) {
+      msg[5] = u_aux12V_mV; /* low byte */
+      msg[6] = u_aux12V_mV>>8; /* high byte */
+    }
+    msg[7] = nTx; /* low byte */
+    msg[8] = nTx>>8; /* high byte */
+
+    if (MY_SENSOR_ID==0x53) { /* Bodenfeuchtemessung */
+      msg[5] = feuchteAdc; /* low byte */
+      msg[6] = feuchteAdc>>8; /* high byte */
+      //msg[7] = feuchteAdc; /* low byte */
+      //msg[8] = feuchteAdc>>8; /* high byte */
+    }
+
+  #if MY_SENSOR_ID==0x53
+   #define NUMBER_OF_TRANSMISSIONS 5
+  #else
+   #define NUMBER_OF_TRANSMISSIONS 2
+  #endif
+  for (k=0; k<NUMBER_OF_TRANSMISSIONS; k++) {
+    /* 4 mal senden für sichere Übertragung ist übertrieben, zweimal reicht. */
+    digitalWrite(LED_BUILTIN, HIGH); // LED ein
+    driver433.send((uint8_t *)msg, 9);
+    driver433.waitPacketSent();
+    digitalWrite(LED_BUILTIN, LOW); // LED aus
+    delay(1+20*k);
+  }
+  nTx++;
+
+}
+
+
+
+// the loop function runs over and over again forever
+void loop() {
+  if (myWakeupReason!=WKREASON_8S) {
+    nFastSleep=0; /* Bei Power-On oder Interrupt sofort reagieren. */
+  }
+  if (nFastSleep>0) { /* Auszulassende Zyklen weiterzählen */
+    nFastSleep--;
+  }
+  #ifdef WITH_SERIAL_DEBUG
+      Serial.println(nFastSleep);
+      delay(5); /* Zeit zum Raussenden des Strings abwarten vor dem Schlafengehen */
+  #endif
+  if (nFastSleep==0) {
+    /* Wir hatten entweder einen Timer-Wakeup und die Anzahl der Nix-Tun-Zyklen ist abgelaufen, oder
+     * wir hatten einen Interrupt-Wakeup, dann auf jeden Fall senden.
+     */
+    readTheInputsAndTransmitTheValues();
+    if (MY_SENSOR_ID==0x50) {
+      /* Sensor 50 */
+      nFastSleep=4; /* 4 * ca. 8 Sekunden bis zum nächsten Senden */
+    } else {
+      /* Sensor ab 0x51 */
+      /* 0x51 --> 6*8=48s */
+      /* 0x52 --> 7*8=56s u.s.w. */
+      nFastSleep= 6 + (MY_SENSOR_ID-0x51);
+      if (MY_SENSOR_ID == 0x53) {
+        //nFastSleep = 1; /* zum debuggen: gleich im nächsten Zyklus aktiv werden */
+        nFastSleep = 60; /* 60*8s=480s=8Minuten */
+      }
+    }
+  } else {
+    /* wir hatten einen Timer-Wakeup, wollen aber in diesem Zyklus nix machen und gehen ganz
+     * schnell wieder schlafen.
+     */
+    #ifdef WITH_SERIAL_DEBUG
+      //Serial.println(F("schnell wieder schlafen"));
+      //delay(10); /* Zeit zum Raussenden des Strings abwarten vor dem Schlafengehen */
+    #endif
+  }
+
+  myWakeupReason=WKREASON_8S;
+  attachInterrupt(0, wakeUpFunction0, FALLING); /* Allow wake up pin to trigger interrupt on edge */
+  attachInterrupt(1, wakeUpFunction1, FALLING); /* Allow wake up pin to trigger interrupt on edge */
+  LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF); /* Schlafen gehen */
+  /* Wir kommen hier hin, wenn wir geweckt wurden. */
+  nWakeCycles++;
+  detachInterrupt(0); /* disable external interrupt on wakeup pin */
+  detachInterrupt(1); /* disable external interrupt on wakeup pin */
+  #ifdef WITH_SERIAL_DEBUG
+    //Serial.println(F("Woke up."));
+  #endif
+ }
+pi@RPi3B:~/temp/2021-11-01_backup_arduino/tx433_02 $
