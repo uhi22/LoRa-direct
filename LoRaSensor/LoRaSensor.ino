@@ -6,7 +6,8 @@
 */
 
 #include <SPI.h>              // include libraries
-#include <LoRa.h>
+#include <LoRa.h> /* Lib: LoRa by Sandeep Mistry */
+#include <LowPower.h> /* Lib: LowPower_LowPowerLab by LowPowerLab 2.2 */
 
 #define WITH_SERIAL_DEBUG
 
@@ -29,6 +30,16 @@ const int irqPin = 2;          // change for your board; must be a hardware inte
 
 uint16_t u_batt_mV, u_aux_mV;
 int8_t txpower_dBm;
+uint8_t nFastSleep = 0;
+
+#define WKREASON_RESET 1
+#define WKREASON_INT0 2
+#define WKREASON_INT1 3
+#define WKREASON_8S 4
+
+uint8_t myWakeupReason;
+uint16_t nWakeCycles;
+uint16_t nTransmitCounts;
 
 void readTheSensors(uint8_t blShow) {
     #define WAIT_TIME_AFTER_REFERENCE_CHANGE_MS 10 /* bewährte 10ms */
@@ -83,7 +94,8 @@ void readTheSensors(uint8_t blShow) {
 
 
 void setup() {
-  Serial.begin(9600);                   // initialize serial
+  myWakeupReason=WKREASON_RESET; /* Reset */
+  Serial.begin(57600);                   // initialize serial
   while (!Serial);
 
   LoRa.setPins(csPin, resetPin, irqPin);
@@ -102,29 +114,63 @@ void setup() {
   LoRa_rxMode();
 }
 
-uint16_t oneSecondCounter;
+
 
 void loop() {
-  if (runEvery(1000)) { // repeat every 1000 millis
+  if (myWakeupReason!=WKREASON_8S) {
+    nFastSleep=0; /* react immediately in case of Power-On or interrupt. */
+  }
+  if (nFastSleep>0) { /* count the "nothing-to-do" cycles */
+    nFastSleep--;
+  }
+  if (nFastSleep==0) {
+    /* There was a timer wakeup and the number of fast sleep cycles elapsed, or
+     * we had in interrupt wakeup, then transmit immediately.
+     */
     readTheSensors(0);
-    switch (oneSecondCounter & 3) {
+    switch (nTransmitCounts & 3) {
        case 0: txpower_dBm=17; break;
        case 1: txpower_dBm=11; break;
        case 2: txpower_dBm=5; break;
        case 3: txpower_dBm=0; break;
     }
     LoRa.setTxPower(txpower_dBm);
-    oneSecondCounter++;
+    nTransmitCounts++;
     String message = "HeLoRa World! ";
     message += "up_s=" + String(millis()/1000);
     message += ",txp_dBm="+String(txpower_dBm);
     message += ",ubatt_mV=" + String(u_batt_mV);
     message += ",u_aux_mV=" + String(u_aux_mV);
-    
+    Serial.println("will send " + message); Serial.flush();
     LoRa_sendMessage(message); // send a message
+    /* Timing constraint: We need to wait here before going to sleep, because the modem
+       is still transmitting (visible on the power consumption), even if it already
+       fired the "transmit complete" */
+    delay(150); /* while the modem is transmitting, stay awake. */
+    Serial.println(".."); Serial.flush();
 
-    Serial.println("Sent Message " + message);
+    nFastSleep = 3; /* 3*8s=24s */
+  } else {
+    /* this was a timer wakeup, but in this cycle we do not want to do anything and
+     * go to sleep as fast as possible. */
+    #ifdef WITH_SERIAL_DEBUG
+      Serial.println(F("Q")); Serial.flush(); /* Q like "Quick go to sleep". And wait until to serial transmission finished before going to sleep */
+    #endif
   }
+  myWakeupReason=WKREASON_8S;
+  //attachInterrupt(0, wakeUpFunction0, FALLING); /* Allow wake up pin to trigger interrupt on edge */
+  //attachInterrupt(1, wakeUpFunction1, FALLING); /* Allow wake up pin to trigger interrupt on edge */
+  LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF); /* go to sleep */
+  /* we reach this part when we have been woken up. */
+  /* Seems we get an wakeup from the LoRa interrupt here, too. Not generally, but depending on the
+     timing between transmission and sleep. So after first going to sleep,
+     we immediate wake up, and so the count of intended 8s cycles is wrong by one. */
+  nWakeCycles++;
+  //detachInterrupt(0); /* disable external interrupt on wakeup pin */
+  //detachInterrupt(1); /* disable external interrupt on wakeup pin */
+  #ifdef WITH_SERIAL_DEBUG
+    Serial.println(F("W")); /* W like "Woke up" */
+  #endif
 }
 
 void LoRa_rxMode(){
@@ -156,19 +202,8 @@ void onReceive(int packetSize) {
 }
 
 void onTxDone() {
-  Serial.println("TxDone");
+  //Serial.println("TxDone"); /* the onTxDone is called in interrupt context. So serial.print is not a good idea. */
   LoRa_rxMode();
 }
 
-boolean runEvery(unsigned long interval)
-{
-  static unsigned long previousMillis = 0;
-  unsigned long currentMillis = millis();
-  if (currentMillis - previousMillis >= interval)
-  {
-    previousMillis = currentMillis;
-    return true;
-  }
-  return false;
-}
 
