@@ -30,6 +30,8 @@ const int irqPin = 2;          // change for your board; must be a hardware inte
 
 uint16_t u_batt_mV, u_aux_mV;
 int8_t txpower_dBm;
+#define SIZE_OF_TRANSMIT_BUFFER 32
+uint8_t transmitbuffer[SIZE_OF_TRANSMIT_BUFFER];
 uint8_t nFastSleep = 0;
 
 #define WKREASON_RESET 1
@@ -111,10 +113,42 @@ void setup() {
 
   LoRa.onReceive(onReceive);
   LoRa.onTxDone(onTxDone);
-  LoRa_rxMode();
+  //LoRa_rxMode();
 }
 
-
+void fillTransmitBuffer(void) {
+  uint16_t tmp;
+  uint16_t sum;
+  sum=0;
+  tmp=nTransmitCounts;
+  transmitbuffer[ 0] = tmp>>8;
+  transmitbuffer[ 1] = tmp & 0xff;
+  transmitbuffer[16] = tmp>>8;
+  transmitbuffer[17] = tmp & 0xff;
+  sum+=tmp;
+  tmp=txpower_dBm;
+  transmitbuffer[ 2] = tmp>>8;
+  transmitbuffer[ 3] = tmp & 0xff;
+  transmitbuffer[18] = tmp>>8;
+  transmitbuffer[19] = tmp & 0xff;
+  sum+=tmp;
+  tmp=u_batt_mV;
+  transmitbuffer[ 4] = tmp>>8;
+  transmitbuffer[ 5] = tmp & 0xff;
+  transmitbuffer[20] = tmp>>8;
+  transmitbuffer[21] = tmp & 0xff;
+  sum+=tmp;
+  tmp=u_aux_mV;
+  transmitbuffer[ 6] = tmp>>8;
+  transmitbuffer[ 7] = tmp & 0xff;
+  transmitbuffer[22] = tmp>>8;
+  transmitbuffer[23] = tmp & 0xff;
+  sum+=tmp;
+  transmitbuffer[ 8] = sum>>8;
+  transmitbuffer[ 9] = sum & 0xff;
+  transmitbuffer[24] = tmp>>8;
+  transmitbuffer[25] = tmp & 0xff;
+}
 
 void loop() {
   if (myWakeupReason!=WKREASON_8S) {
@@ -136,13 +170,14 @@ void loop() {
     }
     LoRa.setTxPower(txpower_dBm);
     nTransmitCounts++;
-    String message = "HeLoRa World! ";
-    message += "up_s=" + String(millis()/1000);
+    String message = "";
+    message += "txcount=" + String(nTransmitCounts);
     message += ",txp_dBm="+String(txpower_dBm);
     message += ",ubatt_mV=" + String(u_batt_mV);
     message += ",u_aux_mV=" + String(u_aux_mV);
     Serial.println("will send " + message); Serial.flush();
-    LoRa_sendMessage(message); // send a message
+    fillTransmitBuffer();
+    LoRa_sendMessage(); // send a message
     /* Timing constraint: We need to wait here before going to sleep, because the modem
        is still transmitting (visible on the power consumption), even if it already
        fired the "transmit complete" */
@@ -173,20 +208,17 @@ void loop() {
   #endif
 }
 
-void LoRa_rxMode(){
-  LoRa.enableInvertIQ();                // active invert I and Q signals
-  LoRa.receive();                       // set receive mode
-}
+//void LoRa_rxMode(){
+//  LoRa.enableInvertIQ();                // active invert I and Q signals
+//  LoRa.receive();                       // set receive mode
+//}
 
-void LoRa_txMode(){
+
+void LoRa_sendMessage(void) {
   LoRa.idle();                          // set standby mode
   LoRa.disableInvertIQ();               // normal mode
-}
-
-void LoRa_sendMessage(String message) {
-  LoRa_txMode();                        // set tx mode
   LoRa.beginPacket();                   // start packet
-  LoRa.print(message);                  // add payload
+  LoRa.write(transmitbuffer, sizeof(transmitbuffer));                 // add payload
   LoRa.endPacket(true);                 // finish packet and send it
 }
 
@@ -203,7 +235,8 @@ void onReceive(int packetSize) {
 
 void onTxDone() {
   //Serial.println("TxDone"); /* the onTxDone is called in interrupt context. So serial.print is not a good idea. */
-  LoRa_rxMode();
+  //LoRa_rxMode(); As sensor node, we do not want the rxMode, because we want to sleep.
+  LoRa.sleep();
 }
 
 

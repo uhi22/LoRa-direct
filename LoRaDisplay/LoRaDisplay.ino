@@ -1,31 +1,10 @@
 /*
-  LoRa Simple Gateway/Node Exemple
-
-  This code uses InvertIQ function to create a simple Gateway/Node logic.
-
-  Gateway - Sends messages with enableInvertIQ()
-          - Receives messages with disableInvertIQ()
-
-  Node    - Sends messages with disableInvertIQ()
-          - Receives messages with enableInvertIQ()
-
-  With this arrangement a Gateway never receive messages from another Gateway
-  and a Node never receive message from another Node.
-  Only Gateway to Node and vice versa.
-
-  This code receives messages and sends a message every second.
-
-  InvertIQ function basically invert the LoRa I and Q signals.
-
-  See the Semtech datasheet, http://www.semtech.com/images/datasheet/sx1276.pdf
-  for more on InvertIQ register 0x33.
-
-  created 05 August 2018
-  by Luiz H. Cassettari
+  LoRa Simple receiver
+  Based on the example "LoRa Simple Gateway/Node Exemple"
 */
 
 #include <SPI.h>              // include libraries
-#include <LoRa.h>
+#include <LoRa.h> /* Lib: LoRa by Sandeep Mistry */
 
 const long frequency = 868E6;  // LoRa Frequency
 
@@ -33,8 +12,13 @@ const int csPin = 10;          // LoRa radio chip select
 const int resetPin = 9;        // LoRa radio reset
 const int irqPin = 2;          // change for your board; must be a hardware interrupt pin
 
+uint8_t myRxBuffer[64];
+uint8_t myRxBufferLen;
+
+uint16_t nTransmitCounts, txpower_dBm, u_batt_mV, u_aux_mV, sum;
+
 void setup() {
-  Serial.begin(9600);                   // initialize serial
+  Serial.begin(57600);                   // initialize serial
   while (!Serial);
 
   LoRa.setPins(csPin, resetPin, irqPin);
@@ -46,7 +30,7 @@ void setup() {
 
   Serial.println("LoRa init succeeded.");
   Serial.println();
-  Serial.println("LoRa Simple Gateway");
+  Serial.println("LoRa Simple Receiver");
   Serial.println("Only receive messages from nodes");
   Serial.println("Tx: invertIQ enable");
   Serial.println("Rx: invertIQ disable");
@@ -88,15 +72,42 @@ void LoRa_sendMessage(String message) {
 }
 
 void onReceive(int packetSize) {
-  String message = "";
-
+  //String message = "";
+  uint8_t rxByte;
+  uint8_t i;
+  //uint16_t messageLen = 0;
+  uint16_t calculatedSum;
+  myRxBufferLen=0;
   while (LoRa.available()) {
-    message += (char)LoRa.read();
+    rxByte = LoRa.read();
+    //message += (char)rxByte;
+    //messageLen++;
+    myRxBuffer[myRxBufferLen]=rxByte;
+    myRxBufferLen++;
   }
 
   int rssi = LoRa.packetRssi(); /* Returns the averaged RSSI of the last received packet (dBm). */
   float snr = LoRa.packetSnr(); /* Returns the estimated SNR of the received packet in dB. */
-  Serial.println("RX: rssi "+ String(rssi) + "  snr " + String(snr) + " " + message);
+  Serial.print("RX: rssi "+ String(rssi) + "  snr " + String(snr) + " len " + String(myRxBufferLen) + " ");
+  //for (i=0; i<8; i++) {
+  //  Serial.print(String(myRxBuffer[i]) + " ");
+  //}
+  //Serial.println();
+  nTransmitCounts = myRxBuffer[0]; nTransmitCounts<<=8; nTransmitCounts+=myRxBuffer[1];
+  txpower_dBm = myRxBuffer[2]; txpower_dBm<<=8; txpower_dBm+=myRxBuffer[3];
+  u_batt_mV = myRxBuffer[4]; u_batt_mV<<=8; u_batt_mV+=myRxBuffer[5];
+  u_aux_mV = myRxBuffer[6]; u_aux_mV<<=8; u_aux_mV+=myRxBuffer[7];
+  sum = myRxBuffer[8]; sum<<=8; sum+=myRxBuffer[9];
+  calculatedSum = nTransmitCounts+txpower_dBm+u_batt_mV+u_aux_mV;
+  Serial.print("nTransmitCounts " + String(nTransmitCounts)
+    + ", txpower_dBm " + String(txpower_dBm)
+    + ", u_batt_mV " + String(u_batt_mV)
+    + ", u_aux_mV " + String(u_aux_mV));
+  if (calculatedSum==sum) {
+    Serial.println(" checksum ok");
+  } else {
+    Serial.println(" checksum ERROR");
+  }
 }
 
 void onTxDone() {
