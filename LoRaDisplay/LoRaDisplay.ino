@@ -1,16 +1,32 @@
 /*
   LoRa Simple receiver
   Based on the example "LoRa Simple Gateway/Node Exemple"
+
+  Hardware: either
+  * Arduino Pro Mini, or
+  * ESP32 DEVKIT according to https://randomnerdtutorials.com/esp32-lora-rfm95-transceiver-arduino-ide/
+
 */
+
+#define USE_ESP32DEVKIT
+
 
 #include <SPI.h>              // include libraries
 #include <LoRa.h> /* Lib: LoRa by Sandeep Mistry */
 
 const long frequency = 868E6;  // LoRa Frequency
 
-const int csPin = 10;          // LoRa radio chip select
-const int resetPin = 9;        // LoRa radio reset
-const int irqPin = 2;          // change for your board; must be a hardware interrupt pin
+#ifdef USE_ESP32DEVKIT
+  //define the pins used by the transceiver module
+  const int csPin = 5;     // LoRa radio chip select
+  const int resetPin = 14; // LoRa radio reset
+  const int irqPin = 2;    // LoRa hardware interrupt pin
+#else
+  /* pins on Arduino Pro Mini */
+  const int csPin = 10;          // LoRa radio chip select
+  const int resetPin = 9;        // LoRa radio reset
+  const int irqPin = 2;          // LoRa hardware interrupt pin
+#endif
 
 uint8_t myRxBuffer[64];
 uint8_t myRxBufferLen;
@@ -22,6 +38,7 @@ void setup() {
   while (!Serial);
 
   LoRa.setPins(csPin, resetPin, irqPin);
+
 
   if (!LoRa.begin(frequency)) {
     Serial.println("LoRa init failed. Check your connections.");
