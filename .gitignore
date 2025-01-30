@@ -1,0 +1,7 @@
+*.bat
+*.ini
+/log
+/local
+*.bak
+privatesettings.h
+

@@ -14,6 +14,11 @@
 #include <SPI.h>              // include libraries
 #include <LoRa.h> /* Lib: LoRa by Sandeep Mistry */
 
+#ifdef USE_ESP32DEVKIT
+  #include <WiFi.h> /* Wifi connection for the ESP32 */
+  #include "privatesettings.h" /* wifi credentials, server name etc */
+#endif
+
 const long frequency = 868E6;  // LoRa Frequency
 
 #ifdef USE_ESP32DEVKIT
@@ -30,16 +35,158 @@ const long frequency = 868E6;  // LoRa Frequency
 
 uint8_t myRxBuffer[64];
 uint8_t myRxBufferLen;
+uint8_t rxDataAvailable;
+int rxRssi;
+float rxSnr;
 
 uint16_t nTransmitCounts, txpower_dBm, u_batt_mV, u_aux_mV, sum;
+
+#ifdef USE_ESP32DEVKIT
+// Use WiFiClient class to create TCP connections
+WiFiClient myHttpClient;
+
+void myWifiConnect(void) {
+   // We start by connecting to a WiFi network
+   if (1) {
+        WiFi.mode(WIFI_STA);
+        Serial.print("Connecting to ");
+        Serial.println(ssid);
+        WiFi.begin(ssid, password);
+        while (WiFi.status() != WL_CONNECTED) {
+            delay(500);
+            Serial.print(".");
+        }
+        Serial.println("");
+        Serial.println("WiFi connected");
+        Serial.println("IP address: ");
+        Serial.println(WiFi.localIP());
+   } else {
+        Serial.println("---WILL NOT CONNECT TO WIFI -----");
+   }
+}
+
+void makeSureThatWifiIsConnected(void) {
+   if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("makeSureThatWifiIsConnected: WiFi is already connected.");
+   } else {
+      Serial.println("makeSureThatWifiIsConnected: Will try to connect.");
+      myWifiConnect();
+   }
+}
+
+void addValueToWebTrace(char *dataname, char *datavalue) {
+    Serial.print("addValueToWebTrace ");
+    //Serial.print(tracename);Serial.print(" ");
+    Serial.print(dataname);Serial.print(" ");
+    Serial.println(datavalue);
+    makeSureThatWifiIsConnected();
+    Serial.print("connecting to ");
+    Serial.println(httphost);
+    int r = myHttpClient.connect(httphost, httpPort);
+    Serial.println(r);
+    if (!r) {
+        Serial.println("http connection failed");
+        return;
+    }
+          // We now create a URI for the request
+        String url;
+        url = "/";
+        url += MY_TRACE_NAME;
+        url += "/add.php";
+        url += "?u=";
+        url += myApiKey;
+        url += "&x=";
+        url += dataname;
+        url += ",";
+        url += datavalue;
+        //url += uptime_s;
+        //url += "s";
+        Serial.print("Requesting URL: ");
+        Serial.println(url);
+
+        // This will send the request to the server
+        myHttpClient.print(String("GET ") + url + " HTTP/1.1\r\n" +
+                     "Host: " + httphost + "\r\n" +
+                     "Connection: close\r\n\r\n");
+        unsigned long timeout = millis();
+        while (myHttpClient.available() == 0) {
+            if (millis() - timeout > 5000) {
+                Serial.println(">>> Client Timeout !");
+                myHttpClient.stop();
+                return;
+            }
+        }
+
+        // Read all the lines of the reply from server and print them to Serial
+        while(myHttpClient.available()) {
+            String line = myHttpClient.readStringUntil('\r');
+            unsigned int L;
+            char charBuf[500];
+            line.toCharArray(charBuf, 500) ;
+            Serial.print(line);
+        }
+        /* Todo: do we need to disconnect here?
+           https://reference.arduino.cc/reference/en/libraries/wifi/ */
+        Serial.println("disconnecting the http");
+        myHttpClient.stop();
+}
+
+void sendDataViaHttp(void) {
+  char s[100];
+  float f;
+  f=u_batt_mV;
+  f/=1000;
+  snprintf(s, 80,  "%1.3f", f); /* attention: Do not use spaces here, because spaces are not allowed in the URL. */
+  addValueToWebTrace("lora25_ubatt", s);
+  f=u_aux_mV;
+  f/=1000;
+  snprintf(s, 80,  "%1.3f", f); /* attention: Do not use spaces here, because spaces are not allowed in the URL. */
+  addValueToWebTrace("lora25_uaux", s);
+}
+#endif /* USE_ESP32DEVKIT */
+
+void checkForReceivedData(void) {
+  uint16_t calculatedSum, i;
+  if (rxDataAvailable) {
+    rxDataAvailable=0;
+    /* data consistency risk: we are using variables which are shared between interrupt context and task context.
+       If we would get an receive interrupt during the evaluation, the data could be broken.
+       Since the messages have a air time of some 10ms, the risk is low that this case really happens. */
+    Serial.print("RX: rssi "+ String(rxRssi) + "  snr " + String(rxSnr) + " len " + String(myRxBufferLen) + " ");
+    //for (i=0; i<8; i++) {
+    //  Serial.print(String(myRxBuffer[i]) + " ");
+    //}
+    //Serial.println();
+    nTransmitCounts = myRxBuffer[0]; nTransmitCounts<<=8; nTransmitCounts+=myRxBuffer[1];
+    txpower_dBm = myRxBuffer[2]; txpower_dBm<<=8; txpower_dBm+=myRxBuffer[3];
+    u_batt_mV = myRxBuffer[4]; u_batt_mV<<=8; u_batt_mV+=myRxBuffer[5];
+    u_aux_mV = myRxBuffer[6]; u_aux_mV<<=8; u_aux_mV+=myRxBuffer[7];
+    sum = myRxBuffer[8]; sum<<=8; sum+=myRxBuffer[9];
+    calculatedSum = nTransmitCounts+txpower_dBm+u_batt_mV+u_aux_mV;
+    Serial.print("nTransmitCounts " + String(nTransmitCounts)
+      + ", txpower_dBm " + String(txpower_dBm)
+      + ", u_batt_mV " + String(u_batt_mV)
+      + ", u_aux_mV " + String(u_aux_mV));
+    if (calculatedSum==sum) {
+      Serial.println(" checksum ok");
+      sendDataViaHttp();
+    } else {
+      Serial.println(" checksum ERROR");
+    }
+  }
+}
+
+
 
 void setup() {
   Serial.begin(57600);                   // initialize serial
   while (!Serial);
+  makeSureThatWifiIsConnected();
+  Serial.println("----------- WiFi Info ------------");
+  WiFi.printDiag(Serial);
+  Serial.println();
 
   LoRa.setPins(csPin, resetPin, irqPin);
-
-
   if (!LoRa.begin(frequency)) {
     Serial.println("LoRa init failed. Check your connections.");
     while (true);                       // if failed, do nothing
@@ -59,6 +206,7 @@ void setup() {
 }
 
 void loop() {
+  checkForReceivedData();
   if (runEvery(5000)) { // repeat every 5000 millis
 
     //String message = "HeLoRa World! ";
@@ -89,43 +237,19 @@ void LoRa_sendMessage(String message) {
 }
 
 void onReceive(int packetSize) {
-  //String message = "";
+  /* This runs in interrupt context. It's not a good idea to do longer things here like serial print. */
   uint8_t rxByte;
-  uint8_t i;
-  //uint16_t messageLen = 0;
-  uint16_t calculatedSum;
   myRxBufferLen=0;
   while (LoRa.available()) {
     rxByte = LoRa.read();
-    //message += (char)rxByte;
-    //messageLen++;
     myRxBuffer[myRxBufferLen]=rxByte;
     myRxBufferLen++;
   }
-
-  int rssi = LoRa.packetRssi(); /* Returns the averaged RSSI of the last received packet (dBm). */
-  float snr = LoRa.packetSnr(); /* Returns the estimated SNR of the received packet in dB. */
-  Serial.print("RX: rssi "+ String(rssi) + "  snr " + String(snr) + " len " + String(myRxBufferLen) + " ");
-  //for (i=0; i<8; i++) {
-  //  Serial.print(String(myRxBuffer[i]) + " ");
-  //}
-  //Serial.println();
-  nTransmitCounts = myRxBuffer[0]; nTransmitCounts<<=8; nTransmitCounts+=myRxBuffer[1];
-  txpower_dBm = myRxBuffer[2]; txpower_dBm<<=8; txpower_dBm+=myRxBuffer[3];
-  u_batt_mV = myRxBuffer[4]; u_batt_mV<<=8; u_batt_mV+=myRxBuffer[5];
-  u_aux_mV = myRxBuffer[6]; u_aux_mV<<=8; u_aux_mV+=myRxBuffer[7];
-  sum = myRxBuffer[8]; sum<<=8; sum+=myRxBuffer[9];
-  calculatedSum = nTransmitCounts+txpower_dBm+u_batt_mV+u_aux_mV;
-  Serial.print("nTransmitCounts " + String(nTransmitCounts)
-    + ", txpower_dBm " + String(txpower_dBm)
-    + ", u_batt_mV " + String(u_batt_mV)
-    + ", u_aux_mV " + String(u_aux_mV));
-  if (calculatedSum==sum) {
-    Serial.println(" checksum ok");
-  } else {
-    Serial.println(" checksum ERROR");
-  }
+  rxRssi = LoRa.packetRssi(); /* Returns the averaged RSSI of the last received packet (dBm). */
+  rxSnr = LoRa.packetSnr(); /* Returns the estimated SNR of the received packet in dB. */
+  rxDataAvailable=1;
 }
+
 
 void onTxDone() {
   Serial.println("TxDone");
