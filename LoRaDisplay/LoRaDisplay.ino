@@ -6,6 +6,10 @@
   * Arduino Pro Mini, or
   * ESP32 DEVKIT according to https://randomnerdtutorials.com/esp32-lora-rfm95-transceiver-arduino-ide/
 
+  Watchdog concept explained: https://forum.arduino.cc/t/esp32-und-watchdog-callback/1072863/23 but this is for the old
+  espressif API. The differences between the old and the new API are explained here: https://esp32.com/viewtopic.php?t=40261
+  and https://iotassistant.io/esp32/fixing-error-hardware-wdt-arduino-esp32/
+  But: The watchdog hits, but the software does not restart. Reason unclear. So we do not use the watchdog at the moment.
 */
 
 #define USE_ESP32DEVKIT
@@ -14,9 +18,19 @@
 #include <SPI.h>              // include libraries
 #include <LoRa.h> /* Lib: LoRa by Sandeep Mistry */
 
+//#define USE_WATCHDOG
+
 #ifdef USE_ESP32DEVKIT
   #include <WiFi.h> /* Wifi connection for the ESP32 */
   #include "privatesettings.h" /* wifi credentials, server name etc */
+  #ifdef USE_WATCHDOG
+    #include <esp_task_wdt.h>
+
+    #define MY_WDT_TIMEOUT 3    /* 3 seconds watchdog timeout */
+    int lastWatchdogTriggerTime;
+    int watchdogTriggerCount;
+    #define CONFIG_FREERTOS_NUMBER_OF_CORES 2 /* ESP32 with 2 cores */
+  #endif
 #endif
 
 const long frequency = 868E6;  // LoRa Frequency
@@ -86,6 +100,8 @@ void addValueToWebTrace(char *dataname, char *datavalue) {
     Serial.println(r);
     if (!r) {
         Serial.println("http connection failed");
+        Serial.println("we try a restart of the ESP."); Serial.flush();
+        ESP.restart();
         return;
     }
           // We now create a URI for the request
@@ -203,6 +219,22 @@ void setup() {
   LoRa.onReceive(onReceive);
   LoRa.onTxDone(onTxDone);
   LoRa_rxMode();
+  #ifdef USE_WATCHDOG
+  Serial.println("configuring the watchdog");
+          // v3 board manager detected
+          // Create and initialize the watchdog timer(WDT) configuration structure
+            esp_task_wdt_config_t wdt_config = {
+                .timeout_ms = MY_WDT_TIMEOUT * 1000, // Convert seconds to milliseconds
+                .idle_core_mask = 1 << 0,         // Monitor core 1 only
+                .trigger_panic = 1             // Enable panic
+            };
+          // Initialize the WDT with the configuration structure
+          esp_task_wdt_deinit(); //wdt is enabled by default, so we need to deinit it first
+          esp_task_wdt_init(&wdt_config);       // Pass the pointer to the configuration structure
+          esp_task_wdt_add(NULL);               // Add current thread to WDT watch    
+          esp_task_wdt_reset();                 // reset timer
+  Serial.println("done");
+  #endif
 }
 
 void loop() {
@@ -217,6 +249,19 @@ void loop() {
 
     //Serial.println("Send Message!");
   }
+
+  #ifdef USE_WATCHDOG
+  // resetting WDT every 2s, but 5 times only, to test that the watchdog works
+  if ((millis() - lastWatchdogTriggerTime >= 2000) && (watchdogTriggerCount < 5)) {
+      Serial.println("Resetting WDT...");
+      esp_task_wdt_reset();
+      lastWatchdogTriggerTime = millis();
+      watchdogTriggerCount++;
+      if (watchdogTriggerCount == 5) {
+        Serial.println("Stopping WDT reset. CPU should reboot in 3s");
+      }
+  }
+  #endif
 }
 
 void LoRa_rxMode(){
