@@ -4,7 +4,8 @@
 
   Hardware: either
   * Arduino Pro Mini, or
-  * ESP32 DEVKIT according to https://randomnerdtutorials.com/esp32-lora-rfm95-transceiver-arduino-ide/
+  * ESP32 DEVKIT according to https://randomnerdtutorials.com/esp32-lora-rfm95-transceiver-arduino-ide/ or
+  * WeAct ESP32C3 
 
   Watchdog concept explained: https://forum.arduino.cc/t/esp32-und-watchdog-callback/1072863/23 but this is for the old
   espressif API. The differences between the old and the new API are explained here: https://esp32.com/viewtopic.php?t=40261
@@ -12,15 +13,16 @@
   But: The watchdog hits, but the software does not restart. Reason unclear. So we do not use the watchdog at the moment.
 */
 
-#define USE_ESP32DEVKIT
-
+//#define USE_ESP32DEVKIT
+#define USE_WEACT_ESP32C3
+#define USE_WIFI
 
 #include <SPI.h>              // include libraries
 #include <LoRa.h> /* Lib: LoRa by Sandeep Mistry */
 
 //#define USE_WATCHDOG
 
-#ifdef USE_ESP32DEVKIT
+#ifdef USE_WIFI
   #include <WiFi.h> /* Wifi connection for the ESP32 */
   #include "privatesettings.h" /* wifi credentials, server name etc */
   #ifdef USE_WATCHDOG
@@ -31,20 +33,35 @@
     int watchdogTriggerCount;
     #define CONFIG_FREERTOS_NUMBER_OF_CORES 2 /* ESP32 with 2 cores */
   #endif
+  #define STATUS_LOG_CYCLE_TIME_MS 30000
+  uint32_t lastStatusLogTime=-15000; /* trick: first log after 15s */
+  uint32_t last100msTime=0;
 #endif
 
 const long frequency = 868E6;  // LoRa Frequency
 
-#ifdef USE_ESP32DEVKIT
+#ifdef USE_WEACT_ESP32C3
+  /* board schematic: https://github.com/WeActStudio/WeActStudio.ESP32C3CoreBoard/blob/master/Hardware/WeAct-ESP32C3CoreBoard_V10_SchDoc.pdf */
+  //define the pins used by the transceiver module
+  //#define PIN_CLK 4  SPI assignment according to https://www.esp32.com/viewtopic.php?t=25680
+  //#define PIN_MISO 5  and http://tamanegi.digick.jp/computer-embedded/mcuboa/wa-esp32c3/
+  //#define PIN_MOSI 6
+  const int csPin = 7;     // LoRa radio chip select
+  const int resetPin = 10; // LoRa radio reset
+  const int irqPin = 2;    // LoRa hardware interrupt pin, DIO0
+  #define LED_PORT 8
+#else
+ #ifdef USE_ESP32DEVKIT
   //define the pins used by the transceiver module
   const int csPin = 5;     // LoRa radio chip select
   const int resetPin = 14; // LoRa radio reset
-  const int irqPin = 2;    // LoRa hardware interrupt pin
-#else
+  const int irqPin = 2;    // LoRa hardware interrupt pin, DIO0
+ #else
   /* pins on Arduino Pro Mini */
   const int csPin = 10;          // LoRa radio chip select
   const int resetPin = 9;        // LoRa radio reset
-  const int irqPin = 2;          // LoRa hardware interrupt pin
+  const int irqPin = 2;          // LoRa hardware interrupt pin, DIO0
+ #endif
 #endif
 
 uint8_t myRxBuffer[64];
@@ -52,10 +69,11 @@ uint8_t myRxBufferLen;
 uint8_t rxDataAvailable;
 int rxRssi;
 float rxSnr;
+uint16_t LED_divider;
 
 uint16_t nTransmitCounts, txpower_dBm, u_batt_mV, u_aux_mV, sum;
 
-#ifdef USE_ESP32DEVKIT
+#ifdef USE_WIFI
 // Use WiFiClient class to create TCP connections
 WiFiClient myHttpClient;
 
@@ -159,7 +177,16 @@ void sendDataViaHttp(void) {
   snprintf(s, 80,  "%1.3f", f); /* attention: Do not use spaces here, because spaces are not allowed in the URL. */
   addValueToWebTrace("lora25_uaux", s);
 }
-#endif /* USE_ESP32DEVKIT */
+
+void sendStatusDataViaHttp(void) {
+  char s[100];
+  float f;
+  f=millis();
+  f/=1000;
+  snprintf(s, 80,  "%1.2f", f); /* attention: Do not use spaces here, because spaces are not allowed in the URL. */
+  addValueToWebTrace("loragw3_uptime", s);
+}
+#endif /* USE_WIFI */
 
 void checkForReceivedData(void) {
   uint16_t calculatedSum, i;
@@ -192,12 +219,26 @@ void checkForReceivedData(void) {
   }
 }
 
-
+void blinkN(uint8_t n) {
+  uint8_t i;
+  for (i=1; i<=n; i++) {
+    digitalWrite(LED_PORT, 0); /* low active, ON */
+    delay(250);
+    digitalWrite(LED_PORT, 1); /* off */
+    delay(250);
+  }
+  delay(800);
+}
 
 void setup() {
+  pinMode(LED_PORT, OUTPUT);
+  blinkN(1);
   Serial.begin(57600);                   // initialize serial
-  while (!Serial);
+  blinkN(2);
+  delay(500); /* The while (!Serial); cannot be used here, because the ESP32C3 hangs forever if no USB is connected. */
+  blinkN(3);
   makeSureThatWifiIsConnected();
+  blinkN(4);
   Serial.println("----------- WiFi Info ------------");
   WiFi.printDiag(Serial);
   Serial.println();
@@ -205,8 +246,11 @@ void setup() {
   LoRa.setPins(csPin, resetPin, irqPin);
   if (!LoRa.begin(frequency)) {
     Serial.println("LoRa init failed. Check your connections.");
-    while (true);                       // if failed, do nothing
+    while (true) {
+        blinkN(9);
+    };                       // if failed, do nothing
   }
+  blinkN(5);
 
   Serial.println("LoRa init succeeded.");
   Serial.println();
@@ -237,18 +281,17 @@ void setup() {
   #endif
 }
 
+void task100ms(void) {
+  LED_divider++;
+  if (LED_divider>=10) {
+    LED_divider=0;
+  }
+  if (LED_divider==0) digitalWrite(LED_PORT, 0); else digitalWrite(LED_PORT, 1);
+}
+
 void loop() {
   checkForReceivedData();
-  if (runEvery(5000)) { // repeat every 5000 millis
-
-    //String message = "HeLoRa World! ";
-    //message += "I'm a Gateway! ";
-    //message += millis();
-
-    //LoRa_sendMessage(message); // send a message
-
-    //Serial.println("Send Message!");
-  }
+  delay(10); /* 10ms sleeping */
 
   #ifdef USE_WATCHDOG
   // resetting WDT every 2s, but 5 times only, to test that the watchdog works
@@ -262,6 +305,17 @@ void loop() {
       }
   }
   #endif
+  if ((millis() - lastStatusLogTime >= STATUS_LOG_CYCLE_TIME_MS)) {
+      Serial.println("Logging status...");
+      lastStatusLogTime +=STATUS_LOG_CYCLE_TIME_MS;
+      sendStatusDataViaHttp();
+  }
+  if ((millis() - last100msTime >= 100)) {
+      last100msTime +=100;
+      task100ms();
+  }
+  
+
 }
 
 void LoRa_rxMode(){
@@ -301,15 +355,5 @@ void onTxDone() {
   LoRa_rxMode();
 }
 
-boolean runEvery(unsigned long interval)
-{
-  static unsigned long previousMillis = 0;
-  unsigned long currentMillis = millis();
-  if (currentMillis - previousMillis >= interval)
-  {
-    previousMillis = currentMillis;
-    return true;
-  }
-  return false;
-}
+
 
