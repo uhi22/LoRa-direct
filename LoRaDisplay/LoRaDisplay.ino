@@ -16,6 +16,7 @@
 //#define USE_ESP32DEVKIT
 #define USE_WEACT_ESP32C3
 #define USE_WIFI
+//#define USE_SERIAL
 
 #include <SPI.h>              // include libraries
 #include <LoRa.h> /* Lib: LoRa by Sandeep Mistry */
@@ -33,7 +34,7 @@
     int watchdogTriggerCount;
     #define CONFIG_FREERTOS_NUMBER_OF_CORES 2 /* ESP32 with 2 cores */
   #endif
-  #define STATUS_LOG_CYCLE_TIME_MS 30000
+  #define STATUS_LOG_CYCLE_TIME_MS 60000
   uint32_t lastStatusLogTime=-15000; /* trick: first log after 15s */
   uint32_t last100msTime=0;
 #endif
@@ -81,46 +82,65 @@ void myWifiConnect(void) {
    // We start by connecting to a WiFi network
    if (1) {
         WiFi.mode(WIFI_STA);
-        Serial.print("Connecting to ");
-        Serial.println(ssid);
+        #ifdef USE_SERIAL
+          Serial.print("Connecting to "); Serial.println(ssid);
+        #endif
         WiFi.begin(ssid, password);
         while (WiFi.status() != WL_CONNECTED) {
             delay(500);
-            Serial.print(".");
+            #ifdef USE_SERIAL
+              Serial.print(".");
+            #endif
         }
-        Serial.println("");
-        Serial.println("WiFi connected");
-        Serial.println("IP address: ");
-        Serial.println(WiFi.localIP());
+        #ifdef USE_SERIAL
+          Serial.println("");
+          Serial.println("WiFi connected");
+          Serial.println("IP address: ");
+          Serial.println(WiFi.localIP());
+        #endif
    } else {
+      #ifdef USE_SERIAL
         Serial.println("---WILL NOT CONNECT TO WIFI -----");
+      #endif
    }
 }
 
 void makeSureThatWifiIsConnected(void) {
    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("makeSureThatWifiIsConnected: WiFi is already connected.");
+      #ifdef USE_SERIAL
+        Serial.println("makeSureThatWifiIsConnected: WiFi is already connected.");
+      #endif
    } else {
-      Serial.println("makeSureThatWifiIsConnected: Will try to connect.");
+      #ifdef USE_SERIAL
+        Serial.println("makeSureThatWifiIsConnected: Will try to connect.");
+      #endif
       myWifiConnect();
    }
 }
 
 void addValueToWebTrace(char *dataname, char *datavalue) {
+  #ifdef USE_SERIAL
     Serial.print("addValueToWebTrace ");
     //Serial.print(tracename);Serial.print(" ");
     Serial.print(dataname);Serial.print(" ");
     Serial.println(datavalue);
-    makeSureThatWifiIsConnected();
+  #endif
+  makeSureThatWifiIsConnected();
+  #ifdef USE_SERIAL
     Serial.print("connecting to ");
     Serial.println(httphost);
-    int r = myHttpClient.connect(httphost, httpPort);
+  #endif
+  int r = myHttpClient.connect(httphost, httpPort);
+  #ifdef USE_SERIAL
     Serial.println(r);
-    if (!r) {
+  #endif
+  if (!r) {
+      #ifdef USE_SERIAL
         Serial.println("http connection failed");
         Serial.println("we try a restart of the ESP."); Serial.flush();
-        ESP.restart();
-        return;
+      #endif
+      ESP.restart();
+      return;
     }
           // We now create a URI for the request
         String url;
@@ -135,8 +155,10 @@ void addValueToWebTrace(char *dataname, char *datavalue) {
         url += datavalue;
         //url += uptime_s;
         //url += "s";
-        Serial.print("Requesting URL: ");
-        Serial.println(url);
+        #ifdef USE_SERIAL
+          Serial.print("Requesting URL: ");
+          Serial.println(url);
+        #endif
 
         // This will send the request to the server
         myHttpClient.print(String("GET ") + url + " HTTP/1.1\r\n" +
@@ -145,7 +167,9 @@ void addValueToWebTrace(char *dataname, char *datavalue) {
         unsigned long timeout = millis();
         while (myHttpClient.available() == 0) {
             if (millis() - timeout > 5000) {
-                Serial.println(">>> Client Timeout !");
+                #ifdef USE_SERIAL
+                  Serial.println(">>> Client Timeout !");
+                #endif
                 myHttpClient.stop();
                 return;
             }
@@ -157,11 +181,15 @@ void addValueToWebTrace(char *dataname, char *datavalue) {
             unsigned int L;
             char charBuf[500];
             line.toCharArray(charBuf, 500) ;
-            Serial.print(line);
+            #ifdef USE_SERIAL
+              Serial.print(line);
+            #endif
         }
         /* Todo: do we need to disconnect here?
            https://reference.arduino.cc/reference/en/libraries/wifi/ */
-        Serial.println("disconnecting the http");
+        #ifdef USE_SERIAL
+          Serial.println("disconnecting the http");
+        #endif
         myHttpClient.stop();
 }
 
@@ -195,7 +223,9 @@ void checkForReceivedData(void) {
     /* data consistency risk: we are using variables which are shared between interrupt context and task context.
        If we would get an receive interrupt during the evaluation, the data could be broken.
        Since the messages have a air time of some 10ms, the risk is low that this case really happens. */
-    Serial.print("RX: rssi "+ String(rxRssi) + "  snr " + String(rxSnr) + " len " + String(myRxBufferLen) + " ");
+    #ifdef USE_SERIAL
+      Serial.print("RX: rssi "+ String(rxRssi) + "  snr " + String(rxSnr) + " len " + String(myRxBufferLen) + " ");
+    #endif
     //for (i=0; i<8; i++) {
     //  Serial.print(String(myRxBuffer[i]) + " ");
     //}
@@ -206,15 +236,21 @@ void checkForReceivedData(void) {
     u_aux_mV = myRxBuffer[6]; u_aux_mV<<=8; u_aux_mV+=myRxBuffer[7];
     sum = myRxBuffer[8]; sum<<=8; sum+=myRxBuffer[9];
     calculatedSum = nTransmitCounts+txpower_dBm+u_batt_mV+u_aux_mV;
-    Serial.print("nTransmitCounts " + String(nTransmitCounts)
+    #ifdef USE_SERIAL
+     Serial.print("nTransmitCounts " + String(nTransmitCounts)
       + ", txpower_dBm " + String(txpower_dBm)
       + ", u_batt_mV " + String(u_batt_mV)
       + ", u_aux_mV " + String(u_aux_mV));
+    #endif
     if (calculatedSum==sum) {
-      Serial.println(" checksum ok");
+      #ifdef USE_SERIAL
+        Serial.println(" checksum ok");
+      #endif
       sendDataViaHttp();
     } else {
-      Serial.println(" checksum ERROR");
+      #ifdef USE_SERIAL
+        Serial.println(" checksum ERROR");
+      #endif
     }
   }
 }
@@ -239,32 +275,39 @@ void setup() {
   blinkN(3);
   makeSureThatWifiIsConnected();
   blinkN(4);
-  Serial.println("----------- WiFi Info ------------");
-  WiFi.printDiag(Serial);
-  Serial.println();
-
+  #ifdef USE_SERIAL
+    Serial.println("----------- WiFi Info ------------");
+    WiFi.printDiag(Serial);
+    Serial.println();
+  #endif
   LoRa.setPins(csPin, resetPin, irqPin);
   if (!LoRa.begin(frequency)) {
-    Serial.println("LoRa init failed. Check your connections.");
+    #ifdef USE_SERIAL
+      Serial.println("LoRa init failed. Check your connections.");
+    #endif
     while (true) {
         blinkN(9);
     };                       // if failed, do nothing
   }
   blinkN(5);
 
-  Serial.println("LoRa init succeeded.");
-  Serial.println();
-  Serial.println("LoRa Simple Receiver");
-  Serial.println("Only receive messages from nodes");
-  Serial.println("Tx: invertIQ enable");
-  Serial.println("Rx: invertIQ disable");
-  Serial.println();
+  #ifdef USE_SERIAL
+    Serial.println("LoRa init succeeded.");
+    Serial.println();
+    Serial.println("LoRa Simple Receiver");
+    Serial.println("Only receive messages from nodes");
+    Serial.println("Tx: invertIQ enable");
+    Serial.println("Rx: invertIQ disable");
+    Serial.println();
+  #endif
 
   LoRa.onReceive(onReceive);
   LoRa.onTxDone(onTxDone);
   LoRa_rxMode();
   #ifdef USE_WATCHDOG
-  Serial.println("configuring the watchdog");
+    #ifdef USE_SERIAL
+      Serial.println("configuring the watchdog");
+    #endif
           // v3 board manager detected
           // Create and initialize the watchdog timer(WDT) configuration structure
             esp_task_wdt_config_t wdt_config = {
@@ -277,7 +320,9 @@ void setup() {
           esp_task_wdt_init(&wdt_config);       // Pass the pointer to the configuration structure
           esp_task_wdt_add(NULL);               // Add current thread to WDT watch    
           esp_task_wdt_reset();                 // reset timer
-  Serial.println("done");
+  #ifdef USE_SERIAL
+    Serial.println("done");
+  #endif
   #endif
 }
 
@@ -296,17 +341,23 @@ void loop() {
   #ifdef USE_WATCHDOG
   // resetting WDT every 2s, but 5 times only, to test that the watchdog works
   if ((millis() - lastWatchdogTriggerTime >= 2000) && (watchdogTriggerCount < 5)) {
-      Serial.println("Resetting WDT...");
+      #ifdef USE_SERIAL
+        Serial.println("Resetting WDT...");
+      #endif
       esp_task_wdt_reset();
       lastWatchdogTriggerTime = millis();
       watchdogTriggerCount++;
       if (watchdogTriggerCount == 5) {
-        Serial.println("Stopping WDT reset. CPU should reboot in 3s");
+        #ifdef USE_SERIAL
+         Serial.println("Stopping WDT reset. CPU should reboot in 3s");
+        #endif
       }
   }
   #endif
   if ((millis() - lastStatusLogTime >= STATUS_LOG_CYCLE_TIME_MS)) {
-      Serial.println("Logging status...");
+      #ifdef USE_SERIAL
+        Serial.println("Logging status...");
+      #endif
       lastStatusLogTime +=STATUS_LOG_CYCLE_TIME_MS;
       sendStatusDataViaHttp();
   }
