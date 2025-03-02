@@ -16,7 +16,7 @@
 //#define USE_ESP32DEVKIT
 #define USE_WEACT_ESP32C3
 #define USE_WIFI
-//#define USE_SERIAL
+#define USE_SERIAL
 
 #include <SPI.h>              // include libraries
 #include <LoRa.h> /* Lib: LoRa by Sandeep Mistry */
@@ -65,9 +65,11 @@ const long frequency = 868E6;  // LoRa Frequency
  #endif
 #endif
 
-uint8_t myRxBuffer[64];
+#define MYRXBUFFER_SIZE 64
+uint8_t myRxBuffer[MYRXBUFFER_SIZE];
 uint8_t myRxBufferLen;
 uint8_t rxDataAvailable;
+int rxPacketSizeOriginal;
 int rxRssi;
 float rxSnr;
 uint16_t LED_divider;
@@ -218,6 +220,7 @@ void sendStatusDataViaHttp(void) {
 
 void checkForReceivedData(void) {
   uint16_t calculatedSum, i;
+  uint16_t nTransmitCounts2, txpower_dBm2, u_batt_mV2, u_aux_mV2, sum2;
   if (rxDataAvailable) {
     rxDataAvailable=0;
     /* data consistency risk: we are using variables which are shared between interrupt context and task context.
@@ -225,28 +228,52 @@ void checkForReceivedData(void) {
        Since the messages have a air time of some 10ms, the risk is low that this case really happens. */
     #ifdef USE_SERIAL
       Serial.print("RX: rssi "+ String(rxRssi) + "  snr " + String(rxSnr) + " len " + String(myRxBufferLen) + " ");
+      Serial.print("rxPacketSizeOriginal:" + String(rxPacketSizeOriginal) + " ");
+
+      for (i=0; i<8; i++) {
+        Serial.print(String(myRxBuffer[i]) + " ");
+      }
+      Serial.println();
     #endif
-    //for (i=0; i<8; i++) {
-    //  Serial.print(String(myRxBuffer[i]) + " ");
-    //}
-    //Serial.println();
     nTransmitCounts = myRxBuffer[0]; nTransmitCounts<<=8; nTransmitCounts+=myRxBuffer[1];
     txpower_dBm = myRxBuffer[2]; txpower_dBm<<=8; txpower_dBm+=myRxBuffer[3];
     u_batt_mV = myRxBuffer[4]; u_batt_mV<<=8; u_batt_mV+=myRxBuffer[5];
     u_aux_mV = myRxBuffer[6]; u_aux_mV<<=8; u_aux_mV+=myRxBuffer[7];
     sum = myRxBuffer[8]; sum<<=8; sum+=myRxBuffer[9];
+    nTransmitCounts2 = myRxBuffer[16]; nTransmitCounts2<<=8; nTransmitCounts2+=myRxBuffer[17];
+    txpower_dBm2 = myRxBuffer[18]; txpower_dBm2<<=8; txpower_dBm2+=myRxBuffer[19];
+    u_batt_mV2 = myRxBuffer[20]; u_batt_mV2<<=8; u_batt_mV2+=myRxBuffer[21];
+    u_aux_mV2 = myRxBuffer[22]; u_aux_mV2<<=8; u_aux_mV2+=myRxBuffer[23];
+    sum2 = myRxBuffer[24]; sum2<<=8; sum2+=myRxBuffer[25]; /* sum2 is wrongly filled by the transmitter. Ignore it for the moment. */
     calculatedSum = nTransmitCounts+txpower_dBm+u_batt_mV+u_aux_mV;
     #ifdef USE_SERIAL
      Serial.print("nTransmitCounts " + String(nTransmitCounts)
       + ", txpower_dBm " + String(txpower_dBm)
       + ", u_batt_mV " + String(u_batt_mV)
-      + ", u_aux_mV " + String(u_aux_mV));
+      + ", u_aux_mV " + String(u_aux_mV)
+      + ", sum " + String(sum));
+     Serial.println();
+     Serial.print("nTransmitCounts2 " + String(nTransmitCounts2)
+      + ", txpower_dBm2 " + String(txpower_dBm2)
+      + ", u_batt_mV2 " + String(u_batt_mV2)
+      + ", u_aux_mV2 " + String(u_aux_mV2)
+      + ", sum2 " + String(sum2));
+     Serial.println();
     #endif
     if (calculatedSum==sum) {
       #ifdef USE_SERIAL
         Serial.println(" checksum ok");
       #endif
-      sendDataViaHttp();
+      if ((nTransmitCounts==nTransmitCounts2) && (txpower_dBm==txpower_dBm2) && (u_batt_mV==u_batt_mV2) && (u_aux_mV==u_aux_mV2)) {
+        #ifdef USE_SERIAL
+          Serial.println(" plausibility ok");
+        #endif
+        sendDataViaHttp();
+      } else {
+        #ifdef USE_SERIAL
+          Serial.println(" plausibility ERROR");
+        #endif 
+      }
     } else {
       #ifdef USE_SERIAL
         Serial.println(" checksum ERROR");
@@ -389,11 +416,14 @@ void LoRa_sendMessage(String message) {
 void onReceive(int packetSize) {
   /* This runs in interrupt context. It's not a good idea to do longer things here like serial print. */
   uint8_t rxByte;
+  rxPacketSizeOriginal = packetSize;
   myRxBufferLen=0;
   while (LoRa.available()) {
     rxByte = LoRa.read();
-    myRxBuffer[myRxBufferLen]=rxByte;
-    myRxBufferLen++;
+    if (myRxBufferLen<MYRXBUFFER_SIZE) {
+      myRxBuffer[myRxBufferLen]=rxByte;
+      myRxBufferLen++;
+    }
   }
   rxRssi = LoRa.packetRssi(); /* Returns the averaged RSSI of the last received packet (dBm). */
   rxSnr = LoRa.packetSnr(); /* Returns the estimated SNR of the received packet in dB. */
